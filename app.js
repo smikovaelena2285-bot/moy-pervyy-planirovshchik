@@ -361,6 +361,8 @@
   let searchResults = [];
   let searchLimit = 50;
   let highlightedId = null;
+  let lastSavedWorkoutId = null;
+  let pendingSavedScroll = null;
   let storageConflict = false;
   let reminderTimer = null;
   let reminderRows = [];
@@ -540,7 +542,23 @@
       else { const list = node("div", "workout-list"); for (const workout of workouts) list.append(renderWorkout(workout)); day.append(list); }
       grid.append(day);
     }
-    renderInsights(); startSearch();
+    renderInsights(); renderSavedWorkoutNotice(); startSearch();
+  }
+  function renderSavedWorkoutNotice() {
+    const workout = lastSavedWorkoutId && resolveWorkout(state, lastSavedWorkoutId);
+    const notice = $("saved-workout-notice");
+    const reason = !workout ? "" : workout.date < selectedMonday || workout.date > addDays(selectedMonday, 6) ? "Занятие в другой неделе" : !matchesFilters(workout) ? "Занятие скрыто фильтрами" : normalizeText($("search-query").value) ? "Открыт поиск занятий" : "";
+    notice.hidden = !reason;
+    if (reason) $("saved-workout-message").textContent = `${state.types.find(type => type.id === workout.typeId).name} · ${humanDate(workout.date)} · ${workout.time || "Без времени"}. ${reason}`;
+  }
+  function rememberSavedWorkout(workout) {
+    lastSavedWorkoutId = workout?.id || null;
+    renderSavedWorkoutNotice();
+    pendingSavedScroll = workout && !$("week-grid").hidden && document.querySelector(`#week-grid [data-workout-id="${CSS.escape(workout.id)}"]`) ? workout.id : null;
+  }
+  function openWorkoutWeek(workout) {
+    $("filter-type").value = ""; $("filter-status").value = ""; highlightedId = workout.id; navigate(workout.date);
+    const target = document.querySelector(`[data-workout-id="${CSS.escape(workout.id)}"]`); target?.scrollIntoView({ block: "center" }); target?.focus();
   }
   function matchesFilters(workout) {
     return (!$("filter-type").value || workout.typeId === $("filter-type").value) && (!$("filter-status").value || workout.status === $("filter-status").value);
@@ -792,7 +810,7 @@
         continue;
       }
       for (const date of dates.keys()) candidate.exceptions.push({ seriesId: series.id, scheduledDate: date, kind: "deleted", workout: null });
-      commit(candidate); announce(`Серия создана; исключено дат: ${dates.size}`); return true;
+      commit(candidate); rememberSavedWorkout([...occurrences(state, segment.fromDate, segment.endDate)].find(workout => workout.seriesId === series.id)); announce(`Серия создана; исключено дат: ${dates.size}`); return true;
     }
   }
   let savingWorkout = false;
@@ -829,7 +847,7 @@
       if (overlapping.length) { showFormError("workout-form-error", conflictMessage(workout, overlapping)); $("workout-time").focus(); return; }
       const candidate = clone(state);
       replaceWorkout(candidate, original?.seriesId ? { ...workout, seriesId: original.seriesId, scheduledDate: original.scheduledDate } : workout);
-      commit(candidate); $("workout-dialog").close(); announce("Занятие сохранено");
+      commit(candidate); rememberSavedWorkout(resolveWorkout(state, workout.id)); $("workout-dialog").close(); announce("Занятие сохранено");
     } catch (error) { showFormError("workout-form-error", error.message); }
     finally { savingWorkout = false; }
   }
@@ -838,8 +856,7 @@
     if (button.dataset.action === "add") { openWorkout(button.dataset.date); return; }
     if (!workout) return;
     if (button.dataset.action === "open-week") {
-      $("filter-type").value = ""; $("filter-status").value = ""; highlightedId = id; navigate(workout.date);
-      const target = document.querySelector(`[data-workout-id="${CSS.escape(id)}"]`); target?.scrollIntoView({ block: "center" }); target?.focus(); return;
+      openWorkoutWeek(workout); return;
     }
     if (workout.seriesId && ["edit", "delete"].includes(button.dataset.action)) { openScope(workout, button.dataset.action); return; }
     if (button.dataset.action === "edit" || button.dataset.action === "copy") { openWorkout(workout.date, id, button.dataset.action === "copy"); return; }
@@ -1082,6 +1099,7 @@
   document.querySelectorAll("[name='searchScope']").forEach(input => input.addEventListener("change", startSearch));
   document.querySelectorAll("[name='statsView']").forEach(input => input.addEventListener("change", renderInsights));
   $("reset-filters").addEventListener("click", () => { $("filter-type").value = ""; $("filter-status").value = ""; $("search-query").value = ""; renderWeek(); });
+  $("show-saved-workout").addEventListener("click", () => { const workout = lastSavedWorkoutId && resolveWorkout(state, lastSavedWorkoutId); if (workout) openWorkoutWeek(workout); else renderSavedWorkoutNotice(); });
   $("search-more").addEventListener("click", () => { searchLimit += 50; renderSearchResults(); });
   $("search-results").addEventListener("click", event => { const button = event.target.closest("button[data-action]"); if (button && !button.disabled) workoutAction(button).catch(error => storageWarning(error.message)); });
   $("edit-goals").addEventListener("click", openGoals); $("add-type-goal").addEventListener("click", () => addGoalRow()); $("goals-form").addEventListener("submit", saveGoals);
@@ -1096,7 +1114,13 @@
   document.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", () => requestClose($(button.dataset.close))));
   document.querySelectorAll("dialog").forEach(dialog => {
     dialog.addEventListener("cancel", event => { event.preventDefault(); if (dialog.id === "confirm-dialog") answerConfirmation(false); else requestClose(dialog); });
-    dialog.addEventListener("close", () => restoreDialogFocus(dialog));
+    dialog.addEventListener("close", () => {
+      restoreDialogFocus(dialog);
+      if (dialog.id === "workout-dialog" && pendingSavedScroll) {
+        const id = pendingSavedScroll; pendingSavedScroll = null;
+        requestAnimationFrame(() => document.querySelector(`#week-grid [data-workout-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" }));
+      }
+    });
     dialog.addEventListener("keydown", event => {
       if (event.key !== "Tab") return;
       const focusable = [...dialog.querySelectorAll("button, input, select, textarea, a[href], [tabindex='0']")].filter(element => !element.disabled && element.getClientRects().length > 0);
