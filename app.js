@@ -5,6 +5,8 @@
   const MIN_DATE = "1900-01-01";
   const MAX_DATE = "9999-12-31";
   const DAY_MS = 86400000;
+  const MAX_EXPORT_BYTES = 2097152;
+  const QUOTES = ["Двигаться можно мягко. Главное — слышать себя", "Сегодня достаточно одного бережного шага", "У твоего ритма есть место для отдыха"];
   const STATUS_LABELS = { planned: "Запланировано", done: "Выполнено", skipped: "Пропущено" };
   const IMAGES = [
     ["strength", "Силовые"], ["pilates", "Пилатес"], ["tribal", "Трайбл"], ["yoga", "Йога"],
@@ -39,9 +41,9 @@
     const date = calendarDate(value);
     return dateFromDay(dayNumber(value) - (date.getUTCDay() + 6) % 7);
   }
+  function localDate(date) { return `${String(date.getFullYear()).padStart(4, "0")}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; }
   function today() {
-    const date = new Date();
-    const value = `${String(date.getFullYear()).padStart(4, "0")}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    const value = localDate(new Date());
     return value < MIN_DATE ? MIN_DATE : value > MAX_DATE ? MAX_DATE : value;
   }
   function humanDate(value) {
@@ -99,6 +101,55 @@
 
   function exactKeys(value, keys) {
     return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+  }
+
+  function isIsoMoment(value) { return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value; }
+  function quoteFor(date) { return QUOTES[(dayNumber(date) - dayNumber("0001-01-01")) % 3]; }
+  function backupDue(data, date) {
+    const last = [data.backup.startedDate, data.backup.lastExportDate, data.backup.reminderDismissedDate].filter(Boolean).sort().at(-1);
+    return dayNumber(date) - dayNumber(last) >= 30;
+  }
+  function localStart(workout) {
+    const [year, month, day] = workout.date.split("-").map(Number); const [hours, minutes] = workout.time.split(":").map(Number);
+    const result = new Date(year, month - 1, day, hours, minutes, 0, 0);
+    const requested = dayNumber(workout.date) * 1440 + hours * 60 + minutes;
+    const wallMinute = date => dayNumber(localDate(date)) * 1440 + date.getHours() * 60 + date.getMinutes();
+    // In a skipped local interval, use the first real minute after the gap.
+    if (wallMinute(result) !== requested) {
+      for (let count = 0; count < 2880; count++) { const previous = new Date(result.getTime() - 60000); if (wallMinute(previous) < requested) break; result.setTime(previous.getTime()); }
+    }
+    return result.getTime();
+  }
+  function reminderPlan(data, now) {
+    const due = []; let next = Infinity;
+    if (!data.settings.remindersEnabled) return { due, delay: null };
+    const shown = new Set(data.remindersShown.map(item => item.occurrenceId));
+    for (const workout of occurrences(data, localDate(now), MAX_DATE)) {
+      if (!workout.time || workout.status !== "planned" || shown.has(workout.id)) continue;
+      const delta = localStart(workout) - now.getTime(); if (delta <= 0) continue;
+      if (delta <= 900000) due.push(workout); else next = Math.min(next, delta - 900000);
+    }
+    due.sort((a, b) => localStart(a) - localStart(b) || a.id.localeCompare(b.id));
+    return { due, delay: Number.isFinite(next) ? Math.min(DAY_MS, Math.max(1, next)) : null };
+  }
+  function parseStateJSON(text) {
+    let value; try { value = JSON.parse(text); } catch { throw new Error("Некорректный JSON"); }
+    let cursor = 0;
+    const whitespace = () => { while (/\s/.test(text[cursor] || "") && cursor < text.length) cursor++; };
+    const string = () => { const start = cursor++; while (cursor < text.length) { if (text[cursor] === "\\") cursor += 2; else if (text[cursor++] === '"') break; } return JSON.parse(text.slice(start, cursor)); };
+    // JSON.parse validates syntax; this walk rejects duplicate object keys it would hide.
+    function walk() {
+      whitespace(); const token = text[cursor];
+      if (token === "{") {
+        cursor++; whitespace(); const keys = new Set(); if (text[cursor] === "}") { cursor++; return; }
+        for (;;) { const key = string(); if (keys.has(key)) throw new Error("В JSON повторяется ключ: " + key); keys.add(key); whitespace(); cursor++; walk(); whitespace(); if (text[cursor++] === "}") break; whitespace(); }
+      } else if (token === "[") {
+        cursor++; whitespace(); if (text[cursor] === "]") { cursor++; return; }
+        for (;;) { walk(); whitespace(); if (text[cursor++] === "]") break; }
+      } else if (token === '"') string();
+      else while (cursor < text.length && !/[\s,}\]]/.test(text[cursor])) cursor++;
+    }
+    walk(); return value;
   }
 
   function addYears(value, years) {
@@ -234,7 +285,7 @@
     const fail = message => { throw new Error(message); };
     if (!value || value.schemaVersion !== 1) fail("Эта версия данных не поддерживается");
     if (!exactKeys(value, ["schemaVersion", "revision", "updatedAt", "types", "workouts", "series", "exceptions", "goals", "remindersShown", "settings", "backup"])) fail("Неверный формат сохранённых данных");
-    if (!Number.isSafeInteger(value.revision) || value.revision < 0 || typeof value.updatedAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value.updatedAt) || !Number.isFinite(Date.parse(value.updatedAt))) fail("Повреждены метаданные");
+    if (!Number.isSafeInteger(value.revision) || value.revision < 0 || !isIsoMoment(value.updatedAt)) fail("Повреждены метаданные");
     for (const key of ["types", "workouts", "series", "exceptions", "goals", "remindersShown"]) if (!Array.isArray(value[key])) fail("Неверный формат списков");
     const ids = new Set();
     const names = new Set();
@@ -274,12 +325,12 @@
     }
     const reminderIds = new Set();
     for (const item of value.remindersShown) {
-      if (!exactKeys(item, ["occurrenceId", "shownAt"]) || typeof item.occurrenceId !== "string" || !/^(workout-[A-Za-z0-9_-]{1,100}|series-[A-Za-z0-9_-]{1,100}:\d{4}-\d{2}-\d{2})$/.test(item.occurrenceId) || reminderIds.has(item.occurrenceId) || typeof item.shownAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(item.shownAt) || !Number.isFinite(Date.parse(item.shownAt))) fail("Некорректный журнал напоминаний"); reminderIds.add(item.occurrenceId);
+      if (!exactKeys(item, ["occurrenceId", "shownAt"]) || typeof item.occurrenceId !== "string" || !/^(workout-[A-Za-z0-9_-]{1,100}|series-[A-Za-z0-9_-]{1,100}:\d{4}-\d{2}-\d{2})$/.test(item.occurrenceId) || item.occurrenceId.includes(":") && !isValidDate(item.occurrenceId.split(":")[1]) || reminderIds.has(item.occurrenceId) || !isIsoMoment(item.shownAt)) fail("Некорректный журнал напоминаний"); reminderIds.add(item.occurrenceId);
     }
     if (scheduleConflicts(value).length) fail("В сохранённых данных есть пересекающиеся занятия");
     if (!exactKeys(value.settings, ["remindersEnabled", "quotesVisible"]) || typeof value.settings.remindersEnabled !== "boolean" || typeof value.settings.quotesVisible !== "boolean") fail("Неверные настройки");
     if (!exactKeys(value.backup, ["startedDate", "lastExportDate", "reminderDismissedDate"]) || !isValidDate(value.backup.startedDate) || [value.backup.lastExportDate, value.backup.reminderDismissedDate].some(date => date !== null && !isValidDate(date))) fail("Неверные сведения о резервных копиях");
-    if (new TextEncoder().encode(JSON.stringify(value, null, 2)).length > 2097152 || JSON.stringify(value).length * 2 > 4194304) fail("Достигнут лимит объёма данных. Скачай копию и удали ненужные записи");
+    if (new TextEncoder().encode(JSON.stringify(value, null, 2)).length > MAX_EXPORT_BYTES || JSON.stringify(value).length * 2 > 4194304) fail("Достигнут лимит объёма данных. Скачай копию и удали ненужные записи");
     return value;
   }
 
@@ -310,6 +361,13 @@
   let searchResults = [];
   let searchLimit = 50;
   let highlightedId = null;
+  let storageConflict = false;
+  let reminderTimer = null;
+  let reminderRows = [];
+  let supportBusy = false;
+  let pendingImport = null;
+  let importReadToken = 0;
+  let importing = false;
   const dialogOrigins = new WeakMap();
 
   function node(tag, className, text) {
@@ -343,14 +401,62 @@
 
   function storageWarning(message, damaged = false) {
     $("storage-warning").hidden = false; $("storage-message").textContent = message;
-    $("retry-save").hidden = damaged; $("save-status-text").textContent = damaged ? "Данные требуют восстановления" : "Изменения не сохранены в браузере";
+    $("retry-save").hidden = damaged || storageConflict; $("save-status-text").textContent = damaged ? "Данные требуют восстановления" : storageConflict ? "Данные изменились в другом окне" : "Изменения не сохранены в браузере";
+    $("restore-data").hidden = !damaged; $("reset-data").hidden = !damaged; $("load-latest").hidden = !storageConflict;
+    $("download-data").lastChild.textContent = damaged ? "Скачать исходные данные" : "Скачать копию";
+  }
+  function hasDrafts() {
+    return $("workout-dialog").open && formSignature($("workout-form")) !== workoutSnapshot || $("type-editor-dialog").open && formSignature($("type-form")) !== typeSnapshot || $("goals-dialog").open && formSignature($("goals-form")) !== goalsSnapshot;
+  }
+  function showStorageConflict() {
+    storageConflict = true; clearTimeout(reminderTimer); reminderTimer = null;
+    reminderRows = []; $("workout-reminder").hidden = true;
+    if (confirmation) answerConfirmation(false);
+    if (conflictCreation) answerSeriesConflicts(false);
+    storageWarning("Данные изменились в другом окне. Локальная копия и введённые поля сохранены в этой странице");
+    if (!$("storage-conflict-dialog").open) openDialog($("storage-conflict-dialog"), $("conflict-load"));
+  }
+  function checkCurrentStorage() {
+    if (storageConflict) return false;
+    try { if (localStorage.getItem(STORAGE_KEY) !== loadedRaw) { showStorageConflict(); return false; } }
+    catch { /* Memory-only editing remains available when storage cannot be read. */ }
+    return true;
+  }
+  function closeWorkingDialogs() {
+    if (confirmation) answerConfirmation(false);
+    if (conflictCreation) answerSeriesConflicts(false);
+    for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
+    pendingImport = null; importReadToken++; scopeRequest = null;
+  }
+  function applyRaw(raw) {
+    let candidate;
+    try { candidate = raw === null ? initialState() : validateState(parseStateJSON(raw)); }
+    catch (error) {
+      loadedRaw = raw; rawDamaged = raw; blocked = true; storageConflict = false; dirty = false; reminderRows = []; clearTimeout(reminderTimer); reminderTimer = null;
+      $("planner").hidden = true; storageWarning(`${error.message}. Исходные данные оставлены без изменений`, true); render(); return;
+    }
+    state = candidate; loadedRaw = raw; rawDamaged = null; blocked = false; dirty = raw === null; storageConflict = false;
+    reminderRows = []; $("planner").hidden = false; $("storage-warning").hidden = true; $("load-latest").hidden = true; $("restore-data").hidden = true; $("reset-data").hidden = true;
+    $("save-status-text").textContent = "Сохранено в браузере";
+    if (raw === null) persist(); render();
+  }
+  function storageChanged() {
+    let raw; try { raw = localStorage.getItem(STORAGE_KEY); } catch { storageWarning("Хранилище браузера недоступно. Можно скачать локальную копию"); return; }
+    if (raw === loadedRaw) return;
+    if (dirty || hasDrafts() || confirmation || conflictCreation || pendingImport || savingWorkout) { showStorageConflict(); return; }
+    closeWorkingDialogs(); applyRaw(raw);
+  }
+  async function loadLatest() {
+    if ((dirty || hasDrafts() || pendingImport) && !(await ask("Загрузить актуальные данные?", "Несохранённые локальные изменения и введённые поля будут отменены", "Загрузить"))) return;
+    let raw; try { raw = localStorage.getItem(STORAGE_KEY); } catch { storageWarning("Не удалось прочитать актуальные данные. Локальная копия сохранена"); return; }
+    closeWorkingDialogs(); applyRaw(raw);
   }
   function persist() {
-    if (blocked) return false;
+    if (blocked || !checkCurrentStorage()) return false;
     try {
-      if (localStorage.getItem(STORAGE_KEY) !== loadedRaw) throw new Error("Данные изменились в другом окне. Скачай текущую копию и открой страницу заново");
       const candidate = { ...state, revision: state.revision + 1, updatedAt: new Date().toISOString() };
       validateState(candidate);
+      if (!checkCurrentStorage()) return false;
       const serialized = JSON.stringify(candidate);
       localStorage.setItem(STORAGE_KEY, serialized);
       state = candidate; loadedRaw = serialized; dirty = false;
@@ -364,6 +470,7 @@
   }
   function commit(candidate) {
     if (blocked) throw new Error("Сохранённые данные требуют восстановления");
+    if (!checkCurrentStorage()) throw new Error("Данные изменились в другом окне. Сохранение приостановлено");
     validateState({ ...candidate, revision: candidate.revision + 1, updatedAt: new Date().toISOString() });
     state = candidate; dirty = true; persist(); render();
   }
@@ -371,7 +478,7 @@
     try { loadedRaw = localStorage.getItem(STORAGE_KEY); }
     catch { dirty = true; storageWarning("Хранилище браузера недоступно. Данные остаются только в этой открытой странице"); return; }
     if (loadedRaw === null) { dirty = true; persist(); return; }
-    try { state = validateState(JSON.parse(loadedRaw)); }
+    try { state = validateState(parseStateJSON(loadedRaw)); }
     catch (error) {
       blocked = true; rawDamaged = loadedRaw;
       storageWarning(`${error.message}. Исходные данные оставлены без изменений. Скачай их копию перед восстановлением`, true);
@@ -536,6 +643,9 @@
     if ($("types-dialog").open) renderTypes();
     if ($("workout-dialog").open) { refreshWorkoutTypes(); updatePreview(); updateStatusAvailability(); }
     $("manage-types").disabled = blocked;
+    $("open-settings").disabled = blocked;
+    document.querySelector(".type-band").hidden = blocked;
+    renderSettings(); refreshSupport();
   }
 
   function openDialog(dialog, focusElement) {
@@ -545,12 +655,12 @@
   }
   function restoreDialogFocus(dialog) {
     const origin = dialogOrigins.get(dialog);
-    if (origin?.element?.isConnected && !origin.element.disabled) { origin.element.focus(); return; }
+    if (origin?.element?.isConnected && !origin.element.disabled && origin.element.getClientRects().length) { origin.element.focus(); return; }
     if (origin?.action && origin.id) {
       const replacement = document.querySelector(`[data-action="${CSS.escape(origin.action)}"][data-record-id="${CSS.escape(origin.id)}"]`);
       if (replacement) { replacement.focus(); return; }
     }
-    if (![...document.querySelectorAll("dialog")].some(item => item.open)) $("add-workout").focus();
+    if (![...document.querySelectorAll("dialog")].some(item => item.open)) (blocked ? $("restore-data") : $("add-workout")).focus();
   }
   function ask(title, message, acceptLabel = "Подтвердить", danger = false) {
     if (confirmation) return Promise.resolve(false);
@@ -563,6 +673,8 @@
   }
   async function requestClose(dialog) {
     if (dialog.id === "series-conflicts-dialog") { answerSeriesConflicts(false); return; }
+    if (dialog.id === "import-dialog") { pendingImport = null; }
+    if (dialog.id === "settings-dialog") importReadToken++;
     const changed = dialog.id === "workout-dialog" ? formSignature($("workout-form")) !== workoutSnapshot : dialog.id === "type-editor-dialog" ? formSignature($("type-form")) !== typeSnapshot : dialog.id === "goals-dialog" ? formSignature($("goals-form")) !== goalsSnapshot : false;
     if (changed && !(await ask("Закрыть без сохранения?", "Введённые изменения не будут сохранены", "Закрыть"))) return;
     dialog.close();
@@ -675,7 +787,7 @@
       try { latest = localStorage.getItem(STORAGE_KEY); } catch { latest = loadedRaw; }
       if (latest !== loadedRaw) {
         if (dirty || latest === null) throw new Error("Расписание изменилось в другом окне. Скачай копию и открой страницу заново");
-        state = validateState(JSON.parse(latest)); loadedRaw = latest; render();
+        state = validateState(parseStateJSON(latest)); loadedRaw = latest; render();
         if (!(await ask("Расписание изменилось", "Конфликты будут проверены заново перед созданием серии", "Проверить"))) return false;
         continue;
       }
@@ -837,14 +949,98 @@
     document.querySelector(`[data-action="archive-type"][data-record-id="${CSS.escape(type.id)}"]`)?.focus();
   }
 
-  function downloadCurrentData() {
-    const damaged = rawDamaged !== null;
-    const blob = new Blob([damaged ? rawDamaged : JSON.stringify(state, null, 2)], { type: damaged ? "text/plain;charset=utf-8" : "application/json;charset=utf-8" });
-    const url = URL.createObjectURL(blob); const link = node("a"); link.href = url; link.download = damaged ? `sea-planner-recovery-${today()}.txt` : `sea-planner-${today()}.json`;
+  function renderSettings() {
+    $("setting-quotes").checked = state.settings.quotesVisible; $("setting-reminders").checked = state.settings.remindersEnabled;
+    $("backup-nudge").hidden = !backupDue(state, today());
+  }
+  function openSettings() {
+    if (blocked) return; renderSettings(); $("import-error").hidden = true; openDialog($("settings-dialog"), $("setting-quotes"));
+  }
+  function changeSetting(key, value) {
+    const candidate = clone(state); candidate.settings[key] = value;
+    try { commit(candidate); } catch (error) { renderSettings(); storageWarning(error.message); }
+  }
+  function refreshSupport() {
+    $("daily-quote").hidden = blocked || !state.settings.quotesVisible; $("daily-quote").textContent = quoteFor(today());
+    clearTimeout(reminderTimer); reminderTimer = null;
+    if (supportBusy) return;
+    if (blocked || storageConflict || document.hidden || !state.settings.remindersEnabled) { reminderRows = []; $("workout-reminder").hidden = true; return; }
+    if (!checkCurrentStorage()) return;
+    supportBusy = true;
+    try {
+      const now = new Date(); const plan = reminderPlan(state, now);
+      if (plan.due.length) {
+        const candidate = clone(state); const shownAt = now.toISOString();
+        for (const workout of plan.due) candidate.remindersShown.push({ occurrenceId: workout.id, shownAt });
+        try { commit(candidate); reminderRows.push(...plan.due.map(workout => workout.id)); }
+        catch (error) { storageWarning(error.message); }
+      }
+      const current = reminderRows.map(id => resolveWorkout(state, id)).filter(workout => workout?.time && workout.status === "planned" && localStart(workout) > now.getTime() && localStart(workout) - now.getTime() <= 900000);
+      reminderRows = current.map(workout => workout.id); const list = $("reminder-list"); list.replaceChildren();
+      for (const workout of current) list.append(node("li", null, `Через ${Math.ceil((localStart(workout) - now.getTime()) / 60000)} мин — ${state.types.find(type => type.id === workout.typeId).name}, ${workout.time}`));
+      $("workout-reminder").hidden = !current.length;
+      const expiry = current.length ? Math.min(...current.map(workout => localStart(workout) - now.getTime())) : null;
+      const delay = expiry === null ? plan.delay : plan.delay === null ? expiry : Math.min(expiry, plan.delay);
+      if (delay !== null) reminderTimer = setTimeout(refreshSupport, Math.min(DAY_MS, Math.max(1, delay)));
+    } finally { supportBusy = false; }
+  }
+  function downloadText(text, filename, type) {
+    const url = URL.createObjectURL(new Blob([text], { type })); const link = node("a"); link.href = url; link.download = filename;
     document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  function downloadCurrentData() {
+    if (rawDamaged !== null) { downloadText(rawDamaged, `sea-planner-recovery-${today()}.txt`, "text/plain;charset=utf-8"); return; }
+    downloadText(JSON.stringify(state, null, 2), `sea-planner-${today()}.json`, "application/json;charset=utf-8");
+    const candidate = clone(state); candidate.backup.lastExportDate = today();
+    try {
+      validateState({ ...candidate, revision: candidate.revision + 1, updatedAt: new Date().toISOString() });
+      if (storageConflict) { state = candidate; dirty = true; renderSettings(); } else commit(candidate);
+    } catch { /* A service timestamp must never cancel an already launched download. */ }
+    announce("Скачивание копии начато");
+  }
+  function chooseImport() { $("import-file").value = ""; $("import-file").click(); }
+  async function readImportFile(file) {
+    if (!file) return;
+    const token = ++importReadToken; $("import-error").hidden = true;
+    try {
+      if (file.size > MAX_EXPORT_BYTES) throw new Error("Файл слишком большой: максимум 2 МиБ");
+      const text = await file.text(); if (token !== importReadToken) return;
+      let parsed; try { parsed = parseStateJSON(text); } catch (error) { throw new Error(`Не удалось прочитать JSON: ${error.message}`); }
+      validateState(parsed); pendingImport = parsed; $("import-summary").replaceChildren();
+      for (const [label, value] of [["Одиночные занятия", parsed.workouts.length], ["Конечные серии", parsed.series.length], ["Виды", parsed.types.length], ["Недели с целями", parsed.goals.length]]) { const row = node("div"); row.append(node("dt", null, label), node("dd", null, value)); $("import-summary").append(row); }
+      let first = null; let last = null;
+      for (const workout of occurrences(parsed, MIN_DATE, today())) { if (first === null || workout.date < first) first = workout.date; if (last === null || workout.date > last) last = workout.date; }
+      $("import-history").textContent = first ? `История: ${humanDate(first)} — ${humanDate(last)}` : "Истории пока нет";
+      $("import-save-error").hidden = true; openDialog($("import-dialog"), $("confirm-import"));
+    } catch (error) { if (token !== importReadToken) return; pendingImport = null; if (blocked) storageWarning(error.message + ". Исходные данные сохранены", true); else showFormError("import-error", error.message); }
+  }
+  function replacementRevision() {
+    let revision = state.revision;
+    try { const stored = JSON.parse(loadedRaw); if (Number.isSafeInteger(stored?.revision) && stored.revision >= 0) revision = Math.max(revision, stored.revision); } catch { /* A damaged key need not contain a revision. */ }
+    return revision + 1;
+  }
+  function replaceDocument(document) {
+    if (!checkCurrentStorage()) throw new Error("Данные изменились в другом окне. Загрузи актуальную версию перед восстановлением");
+    const candidate = { ...clone(document), revision: replacementRevision(), updatedAt: new Date().toISOString() }; validateState(candidate);
+    const serialized = JSON.stringify(candidate); localStorage.setItem(STORAGE_KEY, serialized);
+    closeWorkingDialogs(); state = candidate; loadedRaw = serialized; dirty = false; blocked = false; rawDamaged = null; storageConflict = false;
+    reminderRows = []; highlightedId = null; $("planner").hidden = false; $("storage-warning").hidden = true; $("restore-data").hidden = true; $("reset-data").hidden = true; $("load-latest").hidden = true;
+    $("filter-type").value = ""; $("filter-status").value = ""; $("search-query").value = ""; $("save-status-text").textContent = "Сохранено в браузере";
+    selectedDate = today(); selectedMonday = monday(selectedDate); currentDay = today(); render(); refreshDay(); announce("Данные восстановлены");
+  }
+  function confirmImport() {
+    if (!pendingImport || !$("import-dialog").open || importing) return; importing = true;
+    try { replaceDocument(pendingImport); }
+    catch (error) { showFormError("import-save-error", `Не удалось сохранить восстановленные данные. ${error.message}`); }
+    finally { importing = false; }
+  }
+  async function resetDamagedData() {
+    if (!blocked || !(await ask("Начать заново?", "Исходные данные будут заменены пустым расписанием", "Начать заново", true))) return;
+    try { replaceDocument(initialState()); } catch (error) { storageWarning(`Не удалось создать новое расписание. ${error.message}`, true); }
   }
   function refreshDay() {
     const updatedDay = today(); if (updatedDay !== currentDay) { currentDay = updatedDay; render(); }
+    renderSettings(); refreshSupport();
     clearTimeout(midnightTimer);
     const now = new Date(); const nextMidnight = new Date(now); nextMidnight.setHours(24, 0, 0, 0);
     midnightTimer = setTimeout(refreshDay, Math.max(1000, nextMidnight.getTime() - now.getTime()));
@@ -911,8 +1107,20 @@
   });
   $("retry-save").addEventListener("click", persist);
   $("download-data").addEventListener("click", downloadCurrentData);
-  window.addEventListener("beforeunload", event => { if (dirty) { event.preventDefault(); event.returnValue = ""; } });
+  $("open-settings").addEventListener("click", openSettings); $("settings-types").addEventListener("click", openTypes);
+  $("setting-quotes").addEventListener("change", event => changeSetting("quotesVisible", event.target.checked));
+  $("setting-reminders").addEventListener("change", event => changeSetting("remindersEnabled", event.target.checked));
+  $("dismiss-reminder").addEventListener("click", () => { reminderRows = []; $("workout-reminder").hidden = true; refreshSupport(); });
+  for (const id of ["export-data", "nudge-export", "import-export-current", "conflict-export"]) $(id).addEventListener("click", downloadCurrentData);
+  for (const id of ["import-data", "restore-data"]) $(id).addEventListener("click", chooseImport);
+  $("import-file").addEventListener("change", event => readImportFile(event.target.files[0]));
+  $("confirm-import").addEventListener("click", confirmImport); $("reset-data").addEventListener("click", resetDamagedData);
+  for (const id of ["load-latest", "conflict-load"]) $(id).addEventListener("click", () => loadLatest().catch(error => storageWarning(error.message)));
+  $("nudge-later").addEventListener("click", () => { const candidate = clone(state); candidate.backup.reminderDismissedDate = today(); try { commit(candidate); } catch (error) { storageWarning(error.message); } });
+  window.addEventListener("storage", event => { if (event.key === STORAGE_KEY || event.key === null) storageChanged(); });
+  window.addEventListener("beforeunload", event => { if (dirty || hasDrafts()) { event.preventDefault(); event.returnValue = ""; } });
   window.addEventListener("focus", refreshDay);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshDay(); });
+  window.addEventListener("pageshow", refreshDay);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshDay(); else refreshSupport(); });
   load(); render(); refreshDay();
 })();

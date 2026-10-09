@@ -51,6 +51,7 @@
     <symbol id="icon-archive" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="4" rx="1"/><path d="M5 7v13a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V7m-9 5h4"/></symbol>
     <symbol id="icon-restore" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2.6 6.4M3 3v8h8"/></symbol>
     <symbol id="icon-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5m-5 5V3"/></symbol>
+    <symbol id="icon-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5m5-5v12"/></symbol>
   </svg>
 
   <div class="page-shell">
@@ -59,12 +60,14 @@
         <svg class="brand-mark" aria-hidden="true"><use href="#icon-waves"/></svg>
         <div><h1>Си <span>— море моего мира</span></h1><p class="tagline">Двигаться в своём ритме</p></div>
       </div>
-      <button id="manage-types" class="button subtle" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>Виды тренировок</button>
+      <div class="header-actions"><button id="manage-types" class="button subtle" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg>Виды тренировок</button><button id="open-settings" class="icon-button" type="button" aria-label="Настройки" title="Настройки"><svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg></button></div>
     </header>
 
     <section class="type-band" aria-label="Виды тренировок"><div id="type-strip" class="type-strip"></div></section>
 
     <main id="planner">
+      <p id="daily-quote" class="daily-quote"></p>
+      <section id="workout-reminder" class="workout-reminder" aria-live="polite" hidden><ul id="reminder-list"></ul><button id="dismiss-reminder" class="icon-button" type="button" aria-label="Закрыть напоминание" title="Закрыть напоминание"><svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg></button></section>
       <section aria-labelledby="week-range" class="schedule-section">
         <div class="schedule-toolbar">
           <div class="week-heading"><p class="eyebrow">Моя неделя</p><h2 id="week-range"></h2></div>
@@ -98,7 +101,7 @@
       </div>
     </main>
 
-    <section id="storage-warning" class="storage-warning" aria-live="polite" hidden><p id="storage-message"></p><div class="warning-actions"><button id="download-data" class="button subtle" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>Скачать копию</button><button id="retry-save" class="button subtle" type="button">Повторить сохранение</button></div></section>
+    <section id="storage-warning" class="storage-warning" aria-live="polite" hidden><p id="storage-message"></p><div class="warning-actions"><button id="download-data" class="button subtle" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>Скачать копию</button><button id="retry-save" class="button subtle" type="button">Повторить сохранение</button><button id="load-latest" class="button subtle" type="button" hidden>Загрузить актуальные данные</button><button id="restore-data" class="button subtle" type="button" hidden><svg class="icon" aria-hidden="true"><use href="#icon-upload"/></svg>Восстановить из файла</button><button id="reset-data" class="button subtle danger-action" type="button" hidden>Начать заново</button></div></section>
     <footer class="app-footer"><p id="save-status" role="status"><svg class="icon small" aria-hidden="true"><use href="#icon-check"/></svg><span id="save-status-text">Сохранено в браузере</span></p><span class="footer-wordmark">Си</span></footer>
     <p id="announcement" class="sr-only" aria-live="polite"></p>
     <noscript><p class="storage-warning">Для работы планировщика нужно включить JavaScript в браузере.</p></noscript>
@@ -163,6 +166,26 @@
       <div class="section-heading goal-type-heading"><h3>По видам</h3><button id="add-type-goal" class="icon-button" type="button" aria-label="Добавить цель по виду" title="Добавить цель по виду"><svg class="icon" aria-hidden="true"><use href="#icon-plus"/></svg></button></div><div id="goal-type-rows"></div>
       <p id="goals-form-error" class="form-error" role="alert" hidden></p><div class="dialog-actions"><button id="delete-goals" class="icon-button danger-action" type="button" aria-label="Удалить цели недели" title="Удалить цели недели"><svg class="icon" aria-hidden="true"><use href="#icon-trash"/></svg></button><button class="button subtle" data-close="goals-dialog" type="button">Отмена</button><button id="save-goals" class="button primary" type="submit">Сохранить</button></div>
     </form>
+  </dialog>
+
+  <dialog id="settings-dialog" class="app-dialog" aria-labelledby="settings-heading">
+    <div class="dialog-heading"><h2 id="settings-heading">Настройки</h2><button class="icon-button" data-close="settings-dialog" type="button" aria-label="Закрыть настройки" title="Закрыть"><svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg></button></div>
+    <section class="settings-section" aria-labelledby="support-heading"><h3 id="support-heading">Поддержка</h3><label class="setting-toggle"><input id="setting-quotes" type="checkbox">Показывать фразу дня</label><label class="setting-toggle"><input id="setting-reminders" type="checkbox">Напоминать о занятиях</label></section>
+    <section class="settings-section" aria-labelledby="settings-types-heading"><div class="section-heading"><h3 id="settings-types-heading">Виды тренировок</h3><button id="settings-types" class="icon-button" type="button" aria-label="Управлять видами тренировок" title="Управлять видами тренировок"><svg class="icon" aria-hidden="true"><use href="#icon-sliders"/></svg></button></div></section>
+    <section class="settings-section" aria-labelledby="backup-heading"><h3 id="backup-heading">Резервные копии</h3><p class="field-hint">Данные хранятся только в этом браузере. Очистка данных сайта или браузера может удалить расписание</p>
+      <div id="backup-nudge" class="backup-nudge" hidden><p>Можно скачать свежую резервную копию</p><div class="warning-actions"><button id="nudge-export" class="button subtle" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>Скачать данные</button><button id="nudge-later" class="button subtle" type="button">Позже</button></div></div>
+      <div class="warning-actions"><button id="export-data" class="button subtle" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>Скачать данные</button><button id="import-data" class="button subtle" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-upload"/></svg>Восстановить из файла</button></div><p id="import-error" class="form-error" role="alert" hidden></p>
+    </section>
+  </dialog>
+
+  <input id="import-file" type="file" accept=".json,application/json" hidden>
+  <dialog id="import-dialog" class="app-dialog" aria-labelledby="import-heading">
+    <div class="dialog-heading"><h2 id="import-heading">Восстановить данные</h2><button class="icon-button" data-close="import-dialog" type="button" aria-label="Отменить восстановление" title="Закрыть"><svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg></button></div><dl id="import-summary" class="import-summary"></dl><p id="import-history" class="field-hint"></p><p class="confirm-message">Текущие данные будут заменены. Скачай копию, если хочешь их сохранить</p><p id="import-save-error" class="form-error" role="alert" hidden></p>
+    <div class="dialog-actions"><button id="import-export-current" class="button subtle" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>Скачать текущие данные</button><button class="button subtle" data-close="import-dialog" type="button">Отмена</button><button id="confirm-import" class="button primary" type="button">Заменить данные</button></div>
+  </dialog>
+
+  <dialog id="storage-conflict-dialog" class="app-dialog" aria-labelledby="storage-conflict-heading">
+    <div class="dialog-heading"><h2 id="storage-conflict-heading">Данные изменились в другом окне</h2><button class="icon-button" data-close="storage-conflict-dialog" type="button" aria-label="Закрыть сообщение о конфликте" title="Закрыть"><svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg></button></div><p class="confirm-message">Локальные данные и введённые поля оставлены без изменений. Сохранение в браузере приостановлено</p><div class="dialog-actions"><button id="conflict-export" class="button subtle" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg>Скачать локальную копию</button><button id="conflict-load" class="button primary" type="button">Загрузить актуальные данные</button></div>
   </dialog>
 
   <dialog id="confirm-dialog" class="app-dialog confirm-dialog" aria-labelledby="confirm-heading" aria-describedby="confirm-message">
